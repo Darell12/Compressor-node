@@ -5,6 +5,8 @@ const path = require("path");
 ffmpeg.setFfprobePath("C:\\PATH_programs\\ffprobe.exe");
 
 const carpeta = "C:/Users/darel/Desktop/compresor/origin";
+const carpetaSalidaOriginal =
+  "C:/Users/darel/Desktop/compresor/origin/original";
 const carpetaSalidaFHD = "C:/Users/darel/Desktop/compresor/origin/720P";
 const carpetaSalidaHD = "C:/Users/darel/Desktop/compresor/origin/480P";
 
@@ -13,102 +15,101 @@ let currentCompressionCount = 0;
 
 function obtenerInformacionVideo(videoPath) {
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(videoPath, (err, probeData) => {
+    ffmpeg.ffprobe(videoPath, (err, metadata) => {
       if (err) {
         reject(err);
         return;
       }
 
-      const durationInSeconds = probeData.format.duration || 0;
-      const sizeInBytes = fs.statSync(videoPath).size || 0;
-      const streams = probeData.streams || [];
-      let resolution = "Desconocida";
-
-      for (const stream of streams) {
-        if (stream.codec_type === "video") {
-          resolution = `${stream.width}x${stream.height}`;
-          break;
-        }
-      }
-
-      const durationInMinutes = (durationInSeconds / 60).toFixed(2);
-      const sizeInMegabytes = (sizeInBytes / (1024 * 1024)).toFixed(2);
-
-      const videoInfo = {
-        duration: durationInMinutes,
-        size: sizeInMegabytes,
-        resolution,
-      };
-
-      resolve(videoInfo);
+      resolve(metadata);
     });
   });
 }
 
-function comprimirVideo(video, callback) {
+function comprimirVideo(video, resolucion, carpetaSalida, callback) {
   currentCompressionCount++;
 
   const rutaVideo = path.join(carpeta, video);
-  const nombreArchivoSalidaFHD =
-    path.basename(video, path.extname(video)) + "_720P.mp4";
-  const rutaSalidaFHD = path.join(carpetaSalidaFHD, nombreArchivoSalidaFHD);
+  const nombreArchivoSalida =
+    path.basename(video, path.extname(video)) + `_${resolucion}.mp4`;
+  const rutaSalida = path.join(carpetaSalida, nombreArchivoSalida);
 
-  const compressionProcess = ffmpeg(rutaVideo)
-    .output(rutaSalidaFHD)
-    .videoCodec("libx264")
-    .size("1280x720")
-    .noAudio()
-    .on("end", () => {
-      console.log(`El video ${video} ha sido comprimido.`);
+  obtenerInformacionVideo(rutaVideo)
+    .then((info) => {
+      const fps =
+        info.streams.find((s) => s.codec_type === "video")?.r_frame_rate ||
+        "30/1";
+      const totalFrames = Math.ceil(parseFloat(fps) * info.format.duration);
+
+      ffmpeg(rutaVideo)
+        .output(rutaSalida)
+        .videoCodec("libx264")
+        .size(resolucion)
+        .on("end", () => {
+          process.stdout.write("\n"); // Salto de línea al finalizar
+          console.log(`El video ${video} ha sido comprimido a ${resolucion}.`);
+          currentCompressionCount--;
+          callback();
+        })
+        .on("progress", function (progress) {
+          const percent = (progress.frames / totalFrames) * 100;
+          process.stdout.clearLine(); // Limpiar la línea actual
+          process.stdout.cursorTo(0); // Mover el cursor al principio de la línea
+          process.stdout.write(
+            `Progreso ${video} (${resolucion}): ${percent.toFixed(2)}%`
+          );
+        })
+        .on("error", (err) => {
+          console.error(
+            `Error al comprimir el video ${video} a ${resolucion}:`,
+            err
+          );
+          currentCompressionCount--;
+          callback();
+        })
+        .run();
+    })
+    .catch((err) => {
+      console.error(`Error al obtener información del video ${video}:`, err);
       currentCompressionCount--;
       callback();
-    })
-    .on("progress", function (progress) {
-      console.log("... frames: " + progress.frames);
-    })
-    .on("error", (err) => {
-      console.error(`Error al comprimir el video ${video}:`, err);
-      currentCompressionCount--;
-      callback();
-    })
-    .run();
+    });
 }
 
-if (!fs.existsSync(carpetaSalidaHD)) {
-  fs.mkdirSync(carpetaSalidaHD);
-}
+function iniciarCompresionesIniciales() {
+  fs.readdir(carpeta, (err, archivos) => {
+    if (err) {
+      console.error("Error al leer la carpeta:", err);
+      return;
+    }
 
-if (!fs.existsSync(carpetaSalidaFHD)) {
-  fs.mkdirSync(carpetaSalidaFHD);
-}
+    const archivosDeVideo = archivos.filter((archivo) => {
+      const extension = path.extname(archivo).toLowerCase();
+      return [".mp4", ".avi", ".mkv", ".mov"].includes(extension);
+    });
 
-const extensionesVideo = [".mp4", ".avi", ".mkv", ".mov"];
+    const videosPendientes = archivosDeVideo.slice(); // Copiar la lista de videos
 
-fs.readdir(carpeta, (err, archivos) => {
-  if (err) {
-    console.error("Error al leer la carpeta:", err);
-    return;
-  }
+    function procesarSiguienteVideo() {
+      if (videosPendientes.length > 0) {
+        const video = videosPendientes.shift(); // Tomar el próximo video
+        comprimirVideo(video, "1280x720", carpetaSalidaFHD, () => {
+          comprimirVideo(video, "854x480", carpetaSalidaHD, () => {
+            procesarSiguienteVideo(); // Llamada recursiva para procesar el siguiente
+          });
+        });
+      }
+    }
 
-  const archivosDeVideo = archivos.filter((archivo) => {
-    const extension = path.extname(archivo).toLowerCase();
-    return extensionesVideo.includes(extension);
+    // Iniciar el procesamiento inicial
+    for (
+      let i = 0;
+      i < Math.min(MAX_CONCURRENT_COMPRESSIONS, videosPendientes.length);
+      i++
+    ) {
+      procesarSiguienteVideo();
+    }
   });
+}
 
-  function procesarSiguienteVideo(index) {
-    if (index < archivosDeVideo.length) {
-      const video = archivosDeVideo[index];
-      comprimirVideo(video, () => {
-        procesarSiguienteVideo(index + 1);
-      });
-    }
-  }
-
-  function iniciarCompresionesIniciales() {
-    for (let i = 0; i < Math.min(MAX_CONCURRENT_COMPRESSIONS, archivosDeVideo.length); i++) {
-      procesarSiguienteVideo(i);
-    }
-  }
-
-  iniciarCompresionesIniciales();
-});
+iniciarCompresionesIniciales();
